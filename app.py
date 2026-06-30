@@ -73,16 +73,20 @@ CHINESE_FONT = setup_chinese_font()
 # ==========================================
 # 1. 初始化 Firebase 連線
 # ==========================================
+# 修改後的寫法（從 Streamlit Secrets 讀取）
 if not firebase_admin._apps:
-    cred = credentials.Certificate("serviceAccountKey.json")
+    # 直接讀取字典格式的金鑰
+    firebase_secrets = dict(st.secrets["firebase"])
+    cred = credentials.Certificate(firebase_secrets)
     firebase_admin.initialize_app(cred)
 db = firestore.client()
 
-GMAIL_USER = "yew@wces.tc.edu.tw"      
-GMAIL_PASSWORD = "msye vyun ygqy wwij"      
+# 從 Secrets 讀取帳號密碼
+GMAIL_USER = st.secrets["GMAIL_USER"]
+GMAIL_PASSWORD = st.secrets["GMAIL_PASSWORD"]
 
-ADMIN_USER = "admin"
-ADMIN_PASSWORD = "wces1234"
+ADMIN_USER = st.secrets["ADMIN_USER"]
+ADMIN_PASSWORD = st.secrets["ADMIN_PASSWORD"]
 
 # ==========================================
 # 2. 登入系統 (Login Gateway) - 🌟 載入 WebP 底圖與完全透明登入框
