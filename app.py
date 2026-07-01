@@ -178,9 +178,8 @@ def get_all_classes():
     return [doc.id for doc in db.collection("schedules").stream()]
 all_classes = get_all_classes()
 
-@st.cache_data(ttl=60, show_spinner=False)
 def get_all_teachers():
-    """從 Firebase 取得教師清單，並利用字典確保帳號不重複"""
+    """從 Firebase 取得最新教師清單 (取消快取以確保資料庫更新時能即時抓取)"""
     docs = db.collection("teachers").stream()
     teachers_dict = {}
     for doc in docs:
@@ -494,7 +493,7 @@ with tab2:
                     generate_class_pdf(row, output_filename=pdf_filename) 
                     pdf_data = open(pdf_filename, "rb").read() if os.path.exists(pdf_filename) else None
                     
-                    t_doc = db.collection("teachers").where("name", "==", t_name).limit(1).get() # 尋找同名老師
+                    t_doc = db.collection("teachers").where("name", "==", t_name).limit(1).get() 
                     t_email = t_doc[0].to_dict().get("email", "") if t_doc else ""
                     
                     if row.get("寄給老師", True) and t_email:
@@ -600,34 +599,37 @@ if st.session_state.is_admin:
 
         st.markdown("---")
         
+        # 即時獲取最新教職員清單
         all_teachers = get_all_teachers()
         
-        # ✅ 需求 1: 使用者資料修改，改為搜尋模式
         st.subheader("🛠️ 教師基本資料修改 (搜尋)")
-        search_query = st.text_input("🔍 請輸入教師「姓名」或「帳號」進行搜尋：").strip()
+        search_query = st.text_input("🔍 請輸入教師「姓名」或「帳號」進行搜尋：", key="search_query").strip()
         
         if search_query:
             # 根據搜尋字串過濾名單
-            filtered_teachers = [t for t in all_teachers if search_query in t['name'] or search_query in t['username']]
+            filtered_teachers = [t for t in all_teachers if search_query in t.get('name', '') or search_query in t.get('username', '')]
             
             if filtered_teachers:
-                selected_t_edit = st.selectbox("請選擇要修改的教師", filtered_teachers, format_func=lambda x: f"{x['name']} ({x['username']})")
+                # 解決下拉選單姓名顯示問題，加入防呆機制 (若姓名不存在，則顯示帳號)
+                selected_t_edit = st.selectbox("請選擇要修改的教師", filtered_teachers, 
+                                               format_func=lambda x: f"{x.get('name', '未知姓名')} ({x.get('username', '未知帳號')})")
                 
                 with st.form("edit_teacher_form"):
+                    t_id = selected_t_edit['username']
                     col_name, col_pw, col_class = st.columns(3)
-                    with col_name: new_name = st.text_input("姓名", value=selected_t_edit['name'])
-                    with col_pw: new_pw = st.text_input("密碼", value=selected_t_edit['password'])
-                    with col_class: new_class = st.text_input("班級", value=selected_t_edit['homeroom_class'])
-                    new_email = st.text_input("Email", value=selected_t_edit['email'])
+                    # ✅ 修復關鍵: 替所有欄位加入獨一無二的 key，確保每次切換不同老師都能重新帶入對應數值
+                    with col_name: new_name = st.text_input("姓名", value=selected_t_edit.get('name', ''), key=f"edit_name_{t_id}")
+                    with col_pw: new_pw = st.text_input("密碼", value=selected_t_edit.get('password', ''), key=f"edit_pw_{t_id}")
+                    with col_class: new_class = st.text_input("班級", value=selected_t_edit.get('homeroom_class', ''), key=f"edit_class_{t_id}")
+                    new_email = st.text_input("Email", value=selected_t_edit.get('email', ''), key=f"edit_email_{t_id}")
                     
                     if st.form_submit_button("💾 儲存修改"):
-                        db.collection("teachers").document(selected_t_edit['username']).update({
+                        db.collection("teachers").document(t_id).update({
                             "name": new_name,
                             "password": new_pw,
                             "homeroom_class": new_class,
                             "email": new_email
                         })
-                        get_all_teachers.clear() # 清除快取
                         st.success(f"🎉 已更新 {new_name} 老師的資料！")
                         time.sleep(1); st.rerun()
             else:
@@ -637,22 +639,28 @@ if st.session_state.is_admin:
             
         st.markdown("---")
         
-        # ✅ 需求 2: 賦予權限選單，只顯示姓名
         st.subheader("➕ 賦予新職務與巡堂權限")
         col1, col2, col3 = st.columns(3)
         with col1: 
-            # 這裡的 format_func 改為只顯示姓名 (x['name'])
-            selected_t = st.selectbox("選擇教職員 (指派權限)", all_teachers, format_func=lambda x: x['name'], key="assign_role")
+            # ✅ 修復關鍵: 加入 get('name') 判斷機制，避免資料庫缺少 name 欄位時出現空白選單
+            selected_t = st.selectbox("選擇教職員 (指派權限)", all_teachers, 
+                                      format_func=lambda x: x.get('name') if x.get('name') else f"無姓名紀錄 ({x.get('username')})", 
+                                      key="assign_role")
         with col2: 
             assigned_title = st.selectbox("賦予行政職務", ["教務主任", "學務主任", "總務主任", "輔導主任", "校長", "教學組長", "生教組長", "研發組長", "巡堂教職員"])
         with col3:
             st.markdown("<br>", unsafe_allow_html=True)
             if st.button("確認指派權限"):
-                db.collection("inspectors").document(selected_t['username']).set({
-                    "username": selected_t['username'], "name": selected_t["name"], "email": selected_t["email"], "title": assigned_title, "updated_at": datetime.now()
-                })
-                st.success(f"🎉 成功指派 **{selected_t['name']}** 擔任 **{assigned_title}**！")
-                time.sleep(1); st.rerun()
+                if selected_t:
+                    db.collection("inspectors").document(selected_t['username']).set({
+                        "username": selected_t['username'], 
+                        "name": selected_t.get("name", "未知"), 
+                        "email": selected_t.get("email", ""), 
+                        "title": assigned_title, 
+                        "updated_at": datetime.now()
+                    })
+                    st.success(f"🎉 成功指派 **{selected_t.get('name', '未知')}** 擔任 **{assigned_title}**！")
+                    time.sleep(1); st.rerun()
                 
         st.markdown("---")
         st.subheader("📋 目前已授權巡堂人員與職務清單")
