@@ -10,6 +10,8 @@ import time
 import io  
 import pandas as pd 
 import base64
+import random    
+import string    
 
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
@@ -147,6 +149,78 @@ if not st.session_state.logged_in:
                             time.sleep(1); st.rerun()
                         else: st.error("🛑 您尚未被賦予「巡堂權限」，請洽管理員。")
                     else: st.error("❌ 帳號或密碼錯誤！")
+                    
+        # ✅ 新增：金鑰驗證式的忘記密碼功能區塊
+        with st.expander("🤔 忘記密碼？"):
+            st.caption("請先輸入帳號獲取驗證金鑰，再使用金鑰重設密碼。")
+            tab_req, tab_reset = st.tabs(["1️⃣ 獲取驗證碼", "2️⃣ 重設新密碼"])
+            
+            with tab_req:
+                req_username = st.text_input("輸入帳號 (Username)", key="req_user")
+                if st.button("發送驗證金鑰至 Email", use_container_width=True):
+                    req_username_clean = req_username.strip()
+                    if not req_username_clean:
+                        st.error("❌ 請輸入帳號！")
+                    else:
+                        teacher_docs = db.collection("teachers").where("username", "==", req_username_clean).limit(1).get()
+                        if teacher_docs:
+                            t_data = teacher_docs[0].to_dict()
+                            t_email = t_data.get("email", "").strip()
+                            if not t_email:
+                                st.error("❌ 此帳號未設定 Email，請聯繫管理員協助處理。")
+                            else:
+                                try:
+                                    # 產生 6 碼英數驗證金鑰
+                                    reset_key = ''.join(random.choices(string.ascii_letters + string.digits, k=6))
+                                    # 將金鑰寫入該教師的資料中
+                                    db.collection("teachers").document(teacher_docs[0].id).update({"reset_key": reset_key})
+                                    
+                                    # 寄送驗證金鑰信件
+                                    server = smtplib.SMTP('smtp.gmail.com', 587)
+                                    server.starttls()
+                                    server.login(GMAIL_USER, GMAIL_PASSWORD)
+                                    msg = EmailMessage()
+                                    msg['Subject'] = "【文昌國小 線上巡堂系統】密碼重置驗證金鑰"
+                                    msg['From'] = GMAIL_USER
+                                    msg['To'] = t_email
+                                    msg.set_content(f"{t_data.get('name', '老師')} 您好：\n\n您正在申請重置密碼。\n\n您的驗證金鑰為：{reset_key}\n\n請回到系統登入頁面的「2️⃣ 重設新密碼」分頁，輸入此金鑰並設定您的新密碼。\n\n系統自動發送，請勿直接回覆。")
+                                    server.send_message(msg)
+                                    server.quit()
+                                    
+                                    st.success(f"✅ 驗證金鑰已成功寄送至：{t_email}，請前往收信並切換至右側「重設新密碼」分頁。")
+                                except Exception as e:
+                                    st.error(f"❌ 發送 Email 失敗，請聯繫管理員。錯誤訊息：{e}")
+                        else:
+                            st.error("❌ 找不到此帳號，請確認輸入是否正確。")
+            
+            with tab_reset:
+                reset_username = st.text_input("帳號 (Username)", key="reset_user")
+                reset_code = st.text_input("驗證金鑰 (Verification Key)", key="reset_code")
+                new_password = st.text_input("設定新密碼 (New Password)", type="password", key="reset_new_pw")
+                if st.button("確認更改密碼", use_container_width=True):
+                    reset_username_clean = reset_username.strip()
+                    reset_code_clean = reset_code.strip()
+                    new_password_clean = new_password.strip()
+                    
+                    if not reset_username_clean or not reset_code_clean or not new_password_clean:
+                        st.error("❌ 請完整填寫帳號、驗證金鑰與新密碼！")
+                    else:
+                        teacher_docs = db.collection("teachers").where("username", "==", reset_username_clean).limit(1).get()
+                        if teacher_docs:
+                            t_data = teacher_docs[0].to_dict()
+                            saved_key = t_data.get("reset_key", "")
+                            # 核對金鑰
+                            if not saved_key or saved_key != reset_code_clean:
+                                st.error("❌ 驗證金鑰錯誤或已失效！請重新獲取。")
+                            else:
+                                # 金鑰正確，更新為新密碼，並清除金鑰 (避免重複使用)
+                                db.collection("teachers").document(teacher_docs[0].id).update({
+                                    "password": new_password_clean,
+                                    "reset_key": firestore.DELETE_FIELD
+                                })
+                                st.success("🎉 密碼更改成功！請關閉此選單，在上方使用新密碼登入系統。")
+                        else:
+                            st.error("❌ 找不到此帳號。")
     st.stop()
 
 # ==========================================
@@ -179,12 +253,6 @@ def get_all_classes():
 all_classes = get_all_classes()
 
 def get_all_teachers():
-    """
-    【修正重點】：處理資料庫中可能的重複與空值幽靈紀錄
-    1. 透過 username 作為 key 來進行去重 (Deduplication)。
-    2. 如果遇到同一個帳號有兩筆資料，優先保留「有填寫姓名」的那筆。
-    3. 最後嚴格過濾掉姓名空白的紀錄，確保不會出現「未命名」。
-    """
     teachers_dict = {}
     for doc in db.collection("teachers").stream():
         d = doc.to_dict() or {}
@@ -194,7 +262,6 @@ def get_all_teachers():
         if not username: 
             continue
             
-        # 若帳號尚未登記，或是現有紀錄沒有名字但新紀錄有名字，則寫入/覆蓋
         if username not in teachers_dict or (name and not teachers_dict[username]["name"]):
             teachers_dict[username] = {
                 "doc_id": doc.id,
@@ -205,10 +272,7 @@ def get_all_teachers():
                 "email": str(d.get("email", "") or "").strip()
             }
             
-    # 嚴格過濾：只保留 name 有值的教職員
     valid_teachers = [t for t in teachers_dict.values() if t["name"]]
-    
-    # 依照姓名排序
     return sorted(valid_teachers, key=lambda x: x["name"])
 
 def get_active_inspectors():
@@ -323,7 +387,8 @@ with tab1:
         with col_c: 
             weekdays_map = {0: "週一", 1: "週二", 2: "週三", 3: "週四", 4: "週五", 5: "週末", 6: "週末"}
             auto_weekday = weekdays_map[inspect_date.weekday()]
-            st.text_input("巡堂星期", value=auto_weekday, disabled=True, key="c_week")
+            # ✅ 修正：移除 key 屬性，確保隨日期動態連動更新
+            st.text_input("巡堂星期", value=auto_weekday, disabled=True)
             weekday_opt = auto_weekday
         with col_d: 
             period_opt = st.selectbox("巡堂節次", [f"第{i}節" for i in range(1, 8)], key="c_period")
@@ -403,7 +468,8 @@ with tab_public:
         with col_pb: inspect_date_pub = st.date_input("巡檢日期", datetime.now(), key="p_date")
         with col_pc: 
             auto_weekday_pub = weekdays_map[inspect_date_pub.weekday()]
-            st.text_input("巡檢星期", value=auto_weekday_pub, disabled=True, key="p_week")
+            # ✅ 修正：移除 key 屬性，確保隨日期動態連動更新
+            st.text_input("巡檢星期", value=auto_weekday_pub, disabled=True)
             weekday_opt_pub = auto_weekday_pub
             
     with st.form("public_submit_form", border=True):
@@ -607,7 +673,6 @@ if st.session_state.is_admin:
     with tab4:
         st.header("⚙️ 學校行政權限與教師資料維護")
         
-        # 信件範本設定
         st.subheader("✉️ Email 範本設定")
         email_data = db.collection("settings").document("email_template").get().to_dict() or {}
         with st.form("email_template_form"):
@@ -620,18 +685,14 @@ if st.session_state.is_admin:
 
         st.markdown("---")
         
-        # 即時獲取最新教職員清單
         all_teachers = get_all_teachers()
         
         st.subheader("🛠️ 教師基本資料修改 (搜尋)")
         search_query = st.text_input("🔍 請輸入教師「姓名」或「帳號」進行搜尋：", key="search_query").strip()
         
         if search_query:
-            # 根據搜尋字串過濾名單
             filtered_teachers = [t for t in all_teachers if search_query in t["name"] or search_query in t["username"]]
-            
             if filtered_teachers:
-                # 【修正重點 1】只顯示姓名
                 selected_t_edit = st.selectbox(
                     "請選擇要修改的教師", 
                     filtered_teachers, 
@@ -664,7 +725,6 @@ if st.session_state.is_admin:
         st.subheader("➕ 賦予新職務與巡堂權限")
         col1, col2, col3 = st.columns(3)
         with col1: 
-            # 【修正重點 2】只顯示姓名，不再產生未命名(帳號)的格式
             selected_t_role = st.selectbox(
                 "選擇教職員 (指派權限)", 
                 all_teachers, 
@@ -698,20 +758,17 @@ if st.session_state.is_admin:
                 if st.button("移除", key=f"del_{ins['doc_id']}"):
                     db.collection("inspectors").document(ins['doc_id']).delete()
                     st.rerun()
-# ==========================================
+
+        # ==========================================
         # 🚀 新學期資料批次匯入區 (課表與教職員)
         # ==========================================
         st.markdown("---")
         st.subheader("📁 新學期資料批次匯入 (Excel/CSV)")
         st.info("💡 建議：新學期只需準備好符合格式的 CSV 或 Excel 檔案，一鍵上傳即可快速更新資料庫。")
 
-        # ------------------------------------------
-        # 產生範例 CSV 供管理者下載參考格式
-        # ------------------------------------------
         with st.expander("📥 點此下載「匯入公版範例檔」"):
             col_dl1, col_dl2 = st.columns(2)
             
-            # 課表範例
             sample_schedule = pd.DataFrame({
                 "班級": ["101", "101", "102"],
                 "星期": ["週一", "週一", "週二"],
@@ -719,10 +776,9 @@ if st.session_state.is_admin:
                 "科目": ["國語", "數學", "英文"],
                 "教師": ["王小明", "王小明", "李大華"]
             })
-            csv_schedule = sample_schedule.to_csv(index=False).encode('utf-8-sig') # utf-8-sig 讓 Excel 開啟不亂碼
+            csv_schedule = sample_schedule.to_csv(index=False).encode('utf-8-sig') 
             col_dl1.download_button("下載【課表】範例 (CSV)", data=csv_schedule, file_name="sample_schedule.csv", mime="text/csv")
             
-            # 教職員範例
             sample_teacher = pd.DataFrame({
                 "帳號": ["t001", "t002"],
                 "姓名": ["王小明", "李大華"],
@@ -733,26 +789,20 @@ if st.session_state.is_admin:
             csv_teacher = sample_teacher.to_csv(index=False).encode('utf-8-sig')
             col_dl2.download_button("下載【教職員】範例 (CSV)", data=csv_teacher, file_name="sample_teacher.csv", mime="text/csv")
 
-        # ------------------------------------------
-        # 功能 A：匯入總日課表
-        # ------------------------------------------
         st.markdown("#### 1. 批次更新班級課表")
         schedule_file = st.file_uploader("請上傳新學期課表", type=["csv", "xlsx"], key="upload_schedule")
         if schedule_file and st.button("🚀 確認匯入並覆寫課表", type="primary", use_container_width=True):
             try:
                 with st.spinner("讀取並更新課表中，請稍候..."):
-                    # 判斷副檔名來讀取
                     if schedule_file.name.endswith('.csv'):
                         df_schedule = pd.read_csv(schedule_file)
                     else:
                         df_schedule = pd.read_excel(schedule_file)
                     
-                    # 確保必要欄位存在
                     required_cols = ["班級", "星期", "節次", "科目", "教師"]
                     if not all(col in df_schedule.columns for col in required_cols):
                         st.error(f"❌ 檔案格式錯誤！必須包含這五個欄位：{', '.join(required_cols)}")
                     else:
-                        # 依據「班級」進行分組整理並寫入 Firebase
                         batch_count = 0
                         for class_name, group in df_schedule.groupby("班級"):
                             class_data = {}
@@ -765,7 +815,6 @@ if st.session_state.is_admin:
                                     "subject": str(row["科目"]).strip(),
                                     "teacher": str(row["教師"]).strip()
                                 }
-                            # 將該班級的整週課表寫入資料庫
                             db.collection("schedules").document(str(class_name).strip()).set(class_data)
                             batch_count += 1
                             
@@ -777,16 +826,13 @@ if st.session_state.is_admin:
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # ------------------------------------------
-        # 功能 B：匯入教職員名單與基本資料
-        # ------------------------------------------
         st.markdown("#### 2. 批次新增/更新教職員名單")
         teacher_file = st.file_uploader("請上傳教職員名單", type=["csv", "xlsx"], key="upload_teacher")
         if teacher_file and st.button("🚀 確認匯入教職員", type="primary", use_container_width=True):
             try:
                 with st.spinner("讀取並更新教職員資料中，請稍候..."):
                     if teacher_file.name.endswith('.csv'):
-                        df_teacher = pd.read_csv(teacher_file, dtype=str) # 強制視為字串避免帳號變成數字
+                        df_teacher = pd.read_csv(teacher_file, dtype=str) 
                     else:
                         df_teacher = pd.read_excel(teacher_file, dtype=str)
                         
@@ -796,19 +842,17 @@ if st.session_state.is_admin:
                     else:
                         t_count = 0
                         for _, row in df_teacher.iterrows():
-                            # 過濾掉空值
                             if pd.isna(row["帳號"]) or not str(row["帳號"]).strip():
                                 continue
                                 
                             username = str(row["帳號"]).strip()
-                            # 寫入 Teachers Collection
                             db.collection("teachers").document(username).set({
                                 "username": username,
                                 "name": str(row["姓名"]).strip() if pd.notna(row["姓名"]) else "",
                                 "password": str(row["密碼"]).strip() if pd.notna(row["密碼"]) else "",
                                 "email": str(row["信箱"]).strip() if pd.notna(row["信箱"]) else "",
                                 "homeroom_class": str(row.get("任教班級", "")).strip() if "任教班級" in row and pd.notna(row["任教班級"]) else ""
-                            }, merge=True) # 使用 merge=True 避免覆蓋掉原有的其他隱藏設定
+                            }, merge=True) 
                             t_count += 1
                             
                         st.success(f"🎉 成功處理了 {t_count} 筆教職員資料！")
@@ -816,14 +860,14 @@ if st.session_state.is_admin:
                         st.rerun()
             except Exception as e:
                 st.error(f"匯入失敗，請檢查檔案格式。錯誤訊息：{e}")
-# ==========================================
+
+        # ==========================================
         # 📦 歷史巡堂紀錄歸檔與清空
         # ==========================================
         st.markdown("---")
         st.subheader("📦 歷史紀錄歸檔與清空 (學期轉換專用)")
         st.info("換學期時，請先將舊紀錄下載備份（歸檔），確認檔案無誤後，再清空資料庫迎接新學期。")
 
-        # 讀取目前所有的紀錄
         records_ref = db.collection("records").stream()
         all_records = []
         for r in records_ref:
@@ -832,14 +876,10 @@ if st.session_state.is_admin:
             all_records.append(data)
         
         if all_records:
-            # 轉換成 DataFrame
             df_records = pd.DataFrame(all_records)
-            
-            # 將欄位中的 list 或 dict 轉換為字串，避免匯出 CSV 時產生格式錯誤
             for col in df_records.columns:
                 df_records[col] = df_records[col].apply(lambda x: str(x) if isinstance(x, (list, dict)) else x)
             
-            # 轉成帶 BOM 的 UTF-8，讓 Windows Excel 開啟不會亂碼
             csv_backup = df_records.to_csv(index=False).encode('utf-8-sig')
             
             st.download_button(
@@ -851,13 +891,11 @@ if st.session_state.is_admin:
 
             st.warning("⚠️ 請務必先點擊上方按鈕下載備份！清空後資料將徹底從資料庫移除，無法復原。")
             
-            # 使用 expander 與 checkbox 進行雙重防呆
             with st.expander("🗑️ 2. 展開清空歷史紀錄 (危險操作)"):
                 confirm_delete = st.checkbox("我確認已經下載備份，並同意清空所有歷史紀錄。")
                 if confirm_delete:
                     if st.button("🚨 確認清空所有紀錄", type="primary"):
                         with st.spinner("正在清空資料庫，請稍候..."):
-                            # Firestore 批次刪除 (每次上限 500 筆，設定 400 筆為一個批次較安全)
                             batch = db.batch()
                             count = 0
                             for doc in db.collection("records").stream():
@@ -867,7 +905,6 @@ if st.session_state.is_admin:
                                     batch.commit()
                                     batch = db.batch()
                             
-                            # 提交剩餘的批次
                             if count % 400 != 0:
                                 batch.commit()
                             
