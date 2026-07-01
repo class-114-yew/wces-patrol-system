@@ -179,27 +179,35 @@ def get_all_classes():
 all_classes = get_all_classes()
 
 def get_all_teachers():
-    """從 Firebase 取得最新教師清單 (取消快取以確保資料庫更新時能即時抓取)"""
-    docs = db.collection("teachers").stream()
-    teachers_dict = {}
-    for doc in docs:
-        d = doc.to_dict()
-        username = d.get("username", doc.id)
-        # 用帳號作為 key 來去重
-        teachers_dict[username] = {
-            "username": username, 
-            "name": d.get("name", ""), 
-            "password": d.get("password", ""), 
-            "homeroom_class": d.get("homeroom_class", ""), 
-            "email": d.get("email", "")
-        }
-    return sorted(list(teachers_dict.values()), key=lambda x: x["username"])
+    """
+    【修正重點】
+    1. 確實保存 Firestore 真實的 doc.id，更新資料時必須用這個 ID 而非 username。
+    2. 強制所有欄位透過 str() 轉型，若資料庫沒有該欄位或是 null，則預設為空字串，防止畫面呈現異常。
+    """
+    teachers_list = []
+    for doc in db.collection("teachers").stream():
+        d = doc.to_dict() or {}
+        teachers_list.append({
+            "doc_id": doc.id,
+            "username": str(d.get("username", "") or "").strip(),
+            "name": str(d.get("name", "") or "").strip(),
+            "password": str(d.get("password", "") or "").strip(),
+            "homeroom_class": str(d.get("homeroom_class", "") or "").strip(),
+            "email": str(d.get("email", "") or "").strip()
+        })
+    # 依照帳號排序
+    return sorted(teachers_list, key=lambda x: x["username"])
 
 def get_active_inspectors():
     inspectors = []
     for doc in db.collection("inspectors").stream():
         d = doc.to_dict()
-        inspectors.append({"name": d.get("name"), "title": d.get("title"), "email": d.get("email"), "display": f"{d.get('title')} ({d.get('name')})"})
+        inspectors.append({
+            "name": d.get("name"), 
+            "title": d.get("title"), 
+            "email": d.get("email"), 
+            "display": f"{d.get('title')} ({d.get('name')})"
+        })
     return inspectors
 
 # ----------------- PDF 產生函式區 (保持不變) -----------------
@@ -607,28 +615,31 @@ if st.session_state.is_admin:
         
         if search_query:
             # 根據搜尋字串過濾名單
-            filtered_teachers = [t for t in all_teachers if search_query in t.get('name', '') or search_query in t.get('username', '')]
+            filtered_teachers = [t for t in all_teachers if search_query in t["name"] or search_query in t["username"]]
             
             if filtered_teachers:
-                # 解決下拉選單姓名顯示問題，加入防呆機制 (若姓名不存在，則顯示帳號)
-                selected_t_edit = st.selectbox("請選擇要修改的教師", filtered_teachers, 
-                                               format_func=lambda x: f"{x.get('name', '未知姓名')} ({x.get('username', '未知帳號')})")
+                # 解決下拉選單姓名顯示問題
+                selected_t_edit = st.selectbox(
+                    "請選擇要修改的教師", 
+                    filtered_teachers, 
+                    format_func=lambda x: f"{x['name']} ({x['username']})" if x['name'] else f"未命名 ({x['username']})"
+                )
                 
-                with st.form("edit_teacher_form"):
-                    t_id = selected_t_edit['username']
+                # 【修正重點】使用該教師專屬的 doc_id 作為 form key，徹底解決 Streamlit Session State 導致欄位空白的問題
+                with st.form(key=f"edit_teacher_form_{selected_t_edit['doc_id']}"):
                     col_name, col_pw, col_class = st.columns(3)
-                    # ✅ 修復關鍵: 替所有欄位加入獨一無二的 key，確保每次切換不同老師都能重新帶入對應數值
-                    with col_name: new_name = st.text_input("姓名", value=selected_t_edit.get('name', ''), key=f"edit_name_{t_id}")
-                    with col_pw: new_pw = st.text_input("密碼", value=selected_t_edit.get('password', ''), key=f"edit_pw_{t_id}")
-                    with col_class: new_class = st.text_input("班級", value=selected_t_edit.get('homeroom_class', ''), key=f"edit_class_{t_id}")
-                    new_email = st.text_input("Email", value=selected_t_edit.get('email', ''), key=f"edit_email_{t_id}")
+                    with col_name: new_name = st.text_input("姓名 (name)", value=selected_t_edit["name"])
+                    with col_pw: new_pw = st.text_input("密碼 (password)", value=selected_t_edit["password"])
+                    with col_class: new_class = st.text_input("班級 (homeroom_class)", value=selected_t_edit["homeroom_class"])
+                    new_email = st.text_input("Email (email)", value=selected_t_edit["email"])
                     
                     if st.form_submit_button("💾 儲存修改"):
-                        db.collection("teachers").document(t_id).update({
-                            "name": new_name,
-                            "password": new_pw,
-                            "homeroom_class": new_class,
-                            "email": new_email
+                        # 【修正重點】使用 Firestore 真實的 doc_id 更新，確保寫入正確的文件
+                        db.collection("teachers").document(selected_t_edit["doc_id"]).update({
+                            "name": new_name.strip(),
+                            "password": new_pw.strip(),
+                            "homeroom_class": new_class.strip(),
+                            "email": new_email.strip()
                         })
                         st.success(f"🎉 已更新 {new_name} 老師的資料！")
                         time.sleep(1); st.rerun()
@@ -642,24 +653,26 @@ if st.session_state.is_admin:
         st.subheader("➕ 賦予新職務與巡堂權限")
         col1, col2, col3 = st.columns(3)
         with col1: 
-            # ✅ 修復關鍵: 加入 get('name') 判斷機制，避免資料庫缺少 name 欄位時出現空白選單
-            selected_t = st.selectbox("選擇教職員 (指派權限)", all_teachers, 
-                                      format_func=lambda x: x.get('name') if x.get('name') else f"無姓名紀錄 ({x.get('username')})", 
-                                      key="assign_role")
+            selected_t_role = st.selectbox(
+                "選擇教職員 (指派權限)", 
+                all_teachers, 
+                format_func=lambda x: f"{x['name']} ({x['username']})" if x['name'] else f"未命名 ({x['username']})", 
+                key="assign_role"
+            )
         with col2: 
             assigned_title = st.selectbox("賦予行政職務", ["教務主任", "學務主任", "總務主任", "輔導主任", "校長", "教學組長", "生教組長", "研發組長", "巡堂教職員"])
         with col3:
             st.markdown("<br>", unsafe_allow_html=True)
             if st.button("確認指派權限"):
-                if selected_t:
-                    db.collection("inspectors").document(selected_t['username']).set({
-                        "username": selected_t['username'], 
-                        "name": selected_t.get("name", "未知"), 
-                        "email": selected_t.get("email", ""), 
+                if selected_t_role and selected_t_role["username"]:
+                    db.collection("inspectors").document(selected_t_role["username"]).set({
+                        "username": selected_t_role["username"], 
+                        "name": selected_t_role["name"], 
+                        "email": selected_t_role["email"], 
                         "title": assigned_title, 
                         "updated_at": datetime.now()
                     })
-                    st.success(f"🎉 成功指派 **{selected_t.get('name', '未知')}** 擔任 **{assigned_title}**！")
+                    st.success(f"🎉 成功指派 **{selected_t_role['name']}** 擔任 **{assigned_title}**！")
                     time.sleep(1); st.rerun()
                 
         st.markdown("---")
