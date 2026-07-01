@@ -816,3 +816,63 @@ if st.session_state.is_admin:
                         st.rerun()
             except Exception as e:
                 st.error(f"匯入失敗，請檢查檔案格式。錯誤訊息：{e}")
+# ==========================================
+        # 📦 歷史巡堂紀錄歸檔與清空
+        # ==========================================
+        st.markdown("---")
+        st.subheader("📦 歷史紀錄歸檔與清空 (學期轉換專用)")
+        st.info("換學期時，請先將舊紀錄下載備份（歸檔），確認檔案無誤後，再清空資料庫迎接新學期。")
+
+        # 讀取目前所有的紀錄
+        records_ref = db.collection("records").stream()
+        all_records = []
+        for r in records_ref:
+            data = r.to_dict()
+            data['doc_id'] = r.id
+            all_records.append(data)
+        
+        if all_records:
+            # 轉換成 DataFrame
+            df_records = pd.DataFrame(all_records)
+            
+            # 將欄位中的 list 或 dict 轉換為字串，避免匯出 CSV 時產生格式錯誤
+            for col in df_records.columns:
+                df_records[col] = df_records[col].apply(lambda x: str(x) if isinstance(x, (list, dict)) else x)
+            
+            # 轉成帶 BOM 的 UTF-8，讓 Windows Excel 開啟不會亂碼
+            csv_backup = df_records.to_csv(index=False).encode('utf-8-sig')
+            
+            st.download_button(
+                label="📥 1. 下載所有歷史紀錄 (CSV 備份)",
+                data=csv_backup,
+                file_name=f"records_archive_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv"
+            )
+
+            st.warning("⚠️ 請務必先點擊上方按鈕下載備份！清空後資料將徹底從資料庫移除，無法復原。")
+            
+            # 使用 expander 與 checkbox 進行雙重防呆
+            with st.expander("🗑️ 2. 展開清空歷史紀錄 (危險操作)"):
+                confirm_delete = st.checkbox("我確認已經下載備份，並同意清空所有歷史紀錄。")
+                if confirm_delete:
+                    if st.button("🚨 確認清空所有紀錄", type="primary"):
+                        with st.spinner("正在清空資料庫，請稍候..."):
+                            # Firestore 批次刪除 (每次上限 500 筆，設定 400 筆為一個批次較安全)
+                            batch = db.batch()
+                            count = 0
+                            for doc in db.collection("records").stream():
+                                batch.delete(doc.reference)
+                                count += 1
+                                if count % 400 == 0:
+                                    batch.commit()
+                                    batch = db.batch()
+                            
+                            # 提交剩餘的批次
+                            if count % 400 != 0:
+                                batch.commit()
+                            
+                        st.success(f"🗑️ 已成功清空 {count} 筆歷史紀錄！")
+                        time.sleep(2)
+                        st.rerun()
+        else:
+            st.success("🎉 目前系統資料庫中沒有任何歷史紀錄，非常乾淨！")
