@@ -180,23 +180,36 @@ all_classes = get_all_classes()
 
 def get_all_teachers():
     """
-    【修正重點】
-    1. 確實保存 Firestore 真實的 doc.id，更新資料時必須用這個 ID 而非 username。
-    2. 強制所有欄位透過 str() 轉型，若資料庫沒有該欄位或是 null，則預設為空字串，防止畫面呈現異常。
+    【修正重點】：處理資料庫中可能的重複與空值幽靈紀錄
+    1. 透過 username 作為 key 來進行去重 (Deduplication)。
+    2. 如果遇到同一個帳號有兩筆資料，優先保留「有填寫姓名」的那筆。
+    3. 最後嚴格過濾掉姓名空白的紀錄，確保不會出現「未命名」。
     """
-    teachers_list = []
+    teachers_dict = {}
     for doc in db.collection("teachers").stream():
         d = doc.to_dict() or {}
-        teachers_list.append({
-            "doc_id": doc.id,
-            "username": str(d.get("username", "") or "").strip(),
-            "name": str(d.get("name", "") or "").strip(),
-            "password": str(d.get("password", "") or "").strip(),
-            "homeroom_class": str(d.get("homeroom_class", "") or "").strip(),
-            "email": str(d.get("email", "") or "").strip()
-        })
-    # 依照帳號排序
-    return sorted(teachers_list, key=lambda x: x["username"])
+        username = str(d.get("username", "") or "").strip()
+        name = str(d.get("name", "") or "").strip()
+        
+        if not username: 
+            continue
+            
+        # 若帳號尚未登記，或是現有紀錄沒有名字但新紀錄有名字，則寫入/覆蓋
+        if username not in teachers_dict or (name and not teachers_dict[username]["name"]):
+            teachers_dict[username] = {
+                "doc_id": doc.id,
+                "username": username,
+                "name": name,
+                "password": str(d.get("password", "") or "").strip(),
+                "homeroom_class": str(d.get("homeroom_class", "") or "").strip(),
+                "email": str(d.get("email", "") or "").strip()
+            }
+            
+    # 嚴格過濾：只保留 name 有值的教職員
+    valid_teachers = [t for t in teachers_dict.values() if t["name"]]
+    
+    # 依照姓名排序
+    return sorted(valid_teachers, key=lambda x: x["name"])
 
 def get_active_inspectors():
     inspectors = []
@@ -618,14 +631,13 @@ if st.session_state.is_admin:
             filtered_teachers = [t for t in all_teachers if search_query in t["name"] or search_query in t["username"]]
             
             if filtered_teachers:
-                # 解決下拉選單姓名顯示問題
+                # 【修正重點 1】只顯示姓名
                 selected_t_edit = st.selectbox(
                     "請選擇要修改的教師", 
                     filtered_teachers, 
-                    format_func=lambda x: f"{x['name']} ({x['username']})" if x['name'] else f"未命名 ({x['username']})"
+                    format_func=lambda x: x["name"]
                 )
                 
-                # 【修正重點】使用該教師專屬的 doc_id 作為 form key，徹底解決 Streamlit Session State 導致欄位空白的問題
                 with st.form(key=f"edit_teacher_form_{selected_t_edit['doc_id']}"):
                     col_name, col_pw, col_class = st.columns(3)
                     with col_name: new_name = st.text_input("姓名 (name)", value=selected_t_edit["name"])
@@ -634,7 +646,6 @@ if st.session_state.is_admin:
                     new_email = st.text_input("Email (email)", value=selected_t_edit["email"])
                     
                     if st.form_submit_button("💾 儲存修改"):
-                        # 【修正重點】使用 Firestore 真實的 doc_id 更新，確保寫入正確的文件
                         db.collection("teachers").document(selected_t_edit["doc_id"]).update({
                             "name": new_name.strip(),
                             "password": new_pw.strip(),
@@ -653,10 +664,11 @@ if st.session_state.is_admin:
         st.subheader("➕ 賦予新職務與巡堂權限")
         col1, col2, col3 = st.columns(3)
         with col1: 
+            # 【修正重點 2】只顯示姓名，不再產生未命名(帳號)的格式
             selected_t_role = st.selectbox(
                 "選擇教職員 (指派權限)", 
                 all_teachers, 
-                format_func=lambda x: f"{x['name']} ({x['username']})" if x['name'] else f"未命名 ({x['username']})", 
+                format_func=lambda x: x["name"], 
                 key="assign_role"
             )
         with col2: 
