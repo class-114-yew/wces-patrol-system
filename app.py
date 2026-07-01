@@ -111,10 +111,11 @@ if not st.session_state.logged_in:
         """, unsafe_allow_html=True)
 
     st.markdown('<div style="height: 12vh;"></div>', unsafe_allow_html=True)
-    st.markdown('<h1 style="text-align: center; color: #1A365D; text-shadow: 0px 0px 15px rgba(255,255,255,0.9); margin-bottom: 40px; font-weight: 900;">🏫 文昌國小 線上巡堂系統</h1>', unsafe_allow_html=True)
+#   st.markdown('<h1 style="text-align: center; color: #1A365D; text-shadow: 0px 0px 15px rgba(255,255,255,0.9); margin-bottom: 40px; font-weight: 900;">🏫 文昌國小 線上巡堂系統</h1>', unsafe_allow_html=True)
     
     col_left, col_form, col_right = st.columns([5.5, 3.5, 1])
     with col_form:
+        # 登入表單
         with st.form("login_form"):
             st.markdown("<h3 style='text-align: center; color: #1A365D;'>🔐 系統登入</h3>", unsafe_allow_html=True)
             u_input = st.text_input("帳號 (Username)")
@@ -149,78 +150,89 @@ if not st.session_state.logged_in:
                             time.sleep(1); st.rerun()
                         else: st.error("🛑 您尚未被賦予「巡堂權限」，請洽管理員。")
                     else: st.error("❌ 帳號或密碼錯誤！")
-                    
-        # ✅ 新增：金鑰驗證式的忘記密碼功能區塊
-        with st.expander("🤔 忘記密碼？"):
-            st.caption("請先輸入帳號獲取驗證金鑰，再使用金鑰重設密碼。")
-            tab_req, tab_reset = st.tabs(["1️⃣ 獲取驗證碼", "2️⃣ 重設新密碼"])
+        
+        # ✅ 修改：把摺疊面板改成獨立的「忘記密碼」按鈕，展開重置流程
+        if "show_forgot_pw" not in st.session_state:
+            st.session_state.show_forgot_pw = False
+
+        if st.button("❓ 忘記密碼", use_container_width=True):
+            # 點擊按鈕切換顯示狀態
+            st.session_state.show_forgot_pw = not st.session_state.show_forgot_pw
             
-            with tab_req:
-                req_username = st.text_input("輸入帳號 (Username)", key="req_user")
-                if st.button("發送驗證金鑰至 Email", use_container_width=True):
-                    req_username_clean = req_username.strip()
-                    if not req_username_clean:
-                        st.error("❌ 請輸入帳號！")
-                    else:
-                        teacher_docs = db.collection("teachers").where("username", "==", req_username_clean).limit(1).get()
-                        if teacher_docs:
-                            t_data = teacher_docs[0].to_dict()
-                            t_email = t_data.get("email", "").strip()
-                            if not t_email:
-                                st.error("❌ 此帳號未設定 Email，請聯繫管理員協助處理。")
-                            else:
-                                try:
-                                    # 產生 6 碼英數驗證金鑰
-                                    reset_key = ''.join(random.choices(string.ascii_letters + string.digits, k=6))
-                                    # 將金鑰寫入該教師的資料中
-                                    db.collection("teachers").document(teacher_docs[0].id).update({"reset_key": reset_key})
-                                    
-                                    # 寄送驗證金鑰信件
-                                    server = smtplib.SMTP('smtp.gmail.com', 587)
-                                    server.starttls()
-                                    server.login(GMAIL_USER, GMAIL_PASSWORD)
-                                    msg = EmailMessage()
-                                    msg['Subject'] = "【文昌國小 線上巡堂系統】密碼重置驗證金鑰"
-                                    msg['From'] = GMAIL_USER
-                                    msg['To'] = t_email
-                                    msg.set_content(f"{t_data.get('name', '老師')} 您好：\n\n您正在申請重置密碼。\n\n您的驗證金鑰為：{reset_key}\n\n請回到系統登入頁面的「2️⃣ 重設新密碼」分頁，輸入此金鑰並設定您的新密碼。\n\n系統自動發送，請勿直接回覆。")
-                                    server.send_message(msg)
-                                    server.quit()
-                                    
-                                    st.success(f"✅ 驗證金鑰已成功寄送至：{t_email}，請前往收信並切換至右側「重設新密碼」分頁。")
-                                except Exception as e:
-                                    st.error(f"❌ 發送 Email 失敗，請聯繫管理員。錯誤訊息：{e}")
+        if st.session_state.show_forgot_pw:
+            with st.container(border=True):
+                st.markdown("<h4 style='text-align: center; color: #1A365D;'>🔑 重設密碼</h4>", unsafe_allow_html=True)
+                st.caption("請先輸入帳號獲取驗證金鑰，再使用金鑰自行設定新密碼。")
+                tab_req, tab_reset = st.tabs(["1️⃣ 獲取驗證碼", "2️⃣ 重設新密碼"])
+                
+                with tab_req:
+                    req_username = st.text_input("輸入您的帳號 (Username)", key="req_user")
+                    if st.button("發送驗證金鑰至 Email", use_container_width=True):
+                        req_username_clean = req_username.strip()
+                        if not req_username_clean:
+                            st.error("❌ 請輸入帳號！")
                         else:
-                            st.error("❌ 找不到此帳號，請確認輸入是否正確。")
-            
-            with tab_reset:
-                reset_username = st.text_input("帳號 (Username)", key="reset_user")
-                reset_code = st.text_input("驗證金鑰 (Verification Key)", key="reset_code")
-                new_password = st.text_input("設定新密碼 (New Password)", type="password", key="reset_new_pw")
-                if st.button("確認更改密碼", use_container_width=True):
-                    reset_username_clean = reset_username.strip()
-                    reset_code_clean = reset_code.strip()
-                    new_password_clean = new_password.strip()
-                    
-                    if not reset_username_clean or not reset_code_clean or not new_password_clean:
-                        st.error("❌ 請完整填寫帳號、驗證金鑰與新密碼！")
-                    else:
-                        teacher_docs = db.collection("teachers").where("username", "==", reset_username_clean).limit(1).get()
-                        if teacher_docs:
-                            t_data = teacher_docs[0].to_dict()
-                            saved_key = t_data.get("reset_key", "")
-                            # 核對金鑰
-                            if not saved_key or saved_key != reset_code_clean:
-                                st.error("❌ 驗證金鑰錯誤或已失效！請重新獲取。")
+                            teacher_docs = db.collection("teachers").where("username", "==", req_username_clean).limit(1).get()
+                            if teacher_docs:
+                                t_data = teacher_docs[0].to_dict()
+                                t_email = t_data.get("email", "").strip()
+                                if not t_email:
+                                    st.error("❌ 此帳號未設定 Email，請聯繫管理員協助處理。")
+                                else:
+                                    try:
+                                        # 產生 6 碼英數驗證金鑰
+                                        reset_key = ''.join(random.choices(string.ascii_letters + string.digits, k=6))
+                                        # 將金鑰寫入該教師的資料庫欄位中
+                                        db.collection("teachers").document(teacher_docs[0].id).update({"reset_key": reset_key})
+                                        
+                                        # 寄送驗證金鑰信件
+                                        server = smtplib.SMTP('smtp.gmail.com', 587)
+                                        server.starttls()
+                                        server.login(GMAIL_USER, GMAIL_PASSWORD)
+                                        msg = EmailMessage()
+                                        msg['Subject'] = "【文昌國小 線上巡堂系統】密碼重置驗證金鑰"
+                                        msg['From'] = GMAIL_USER
+                                        msg['To'] = t_email
+                                        msg.set_content(f"{t_data.get('name', '老師')} 您好：\n\n您正在申請重置密碼。\n\n您的驗證金鑰為：{reset_key}\n\n請回到系統登入頁面，切換至「2️⃣ 重設新密碼」分頁，輸入此金鑰並設定您的新密碼。\n\n系統自動發送，請勿直接回覆。")
+                                        server.send_message(msg)
+                                        server.quit()
+                                        
+                                        st.success(f"✅ 驗證金鑰已成功寄送至：{t_email}，請前往收信並切換至右側分頁。")
+                                    except Exception as e:
+                                        st.error(f"❌ 發送 Email 失敗，請聯繫管理員。錯誤訊息：{e}")
                             else:
-                                # 金鑰正確，更新為新密碼，並清除金鑰 (避免重複使用)
-                                db.collection("teachers").document(teacher_docs[0].id).update({
-                                    "password": new_password_clean,
-                                    "reset_key": firestore.DELETE_FIELD
-                                })
-                                st.success("🎉 密碼更改成功！請關閉此選單，在上方使用新密碼登入系統。")
+                                st.error("❌ 找不到此帳號，請確認輸入是否正確。")
+                
+                with tab_reset:
+                    reset_username = st.text_input("帳號 (Username)", key="reset_user")
+                    reset_code = st.text_input("驗證金鑰 (Verification Key)", key="reset_code")
+                    new_password = st.text_input("設定新密碼 (New Password)", type="password", key="reset_new_pw")
+                    if st.button("確認更改密碼", use_container_width=True):
+                        reset_username_clean = reset_username.strip()
+                        reset_code_clean = reset_code.strip()
+                        new_password_clean = new_password.strip()
+                        
+                        if not reset_username_clean or not reset_code_clean or not new_password_clean:
+                            st.error("❌ 請完整填寫帳號、驗證金鑰與新密碼！")
                         else:
-                            st.error("❌ 找不到此帳號。")
+                            teacher_docs = db.collection("teachers").where("username", "==", reset_username_clean).limit(1).get()
+                            if teacher_docs:
+                                t_data = teacher_docs[0].to_dict()
+                                saved_key = t_data.get("reset_key", "")
+                                # 核對金鑰
+                                if not saved_key or saved_key != reset_code_clean:
+                                    st.error("❌ 驗證金鑰錯誤或已失效！請重新獲取。")
+                                else:
+                                    # 金鑰正確，更新為新密碼，並清除金鑰 (避免重複使用)
+                                    db.collection("teachers").document(teacher_docs[0].id).update({
+                                        "password": new_password_clean,
+                                        "reset_key": firestore.DELETE_FIELD
+                                    })
+                                    st.success("🎉 密碼更改成功！請使用您的新密碼在上方登入系統。")
+                                    # 成功後收起重置密碼區塊
+                                    st.session_state.show_forgot_pw = False
+                            else:
+                                st.error("❌ 找不到此帳號。")
     st.stop()
 
 # ==========================================
@@ -387,7 +399,6 @@ with tab1:
         with col_c: 
             weekdays_map = {0: "週一", 1: "週二", 2: "週三", 3: "週四", 4: "週五", 5: "週末", 6: "週末"}
             auto_weekday = weekdays_map[inspect_date.weekday()]
-            # ✅ 修正：移除 key 屬性，確保隨日期動態連動更新
             st.text_input("巡堂星期", value=auto_weekday, disabled=True)
             weekday_opt = auto_weekday
         with col_d: 
@@ -468,7 +479,6 @@ with tab_public:
         with col_pb: inspect_date_pub = st.date_input("巡檢日期", datetime.now(), key="p_date")
         with col_pc: 
             auto_weekday_pub = weekdays_map[inspect_date_pub.weekday()]
-            # ✅ 修正：移除 key 屬性，確保隨日期動態連動更新
             st.text_input("巡檢星期", value=auto_weekday_pub, disabled=True)
             weekday_opt_pub = auto_weekday_pub
             
