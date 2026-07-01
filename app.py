@@ -698,3 +698,121 @@ if st.session_state.is_admin:
                 if st.button("移除", key=f"del_{ins['doc_id']}"):
                     db.collection("inspectors").document(ins['doc_id']).delete()
                     st.rerun()
+# ==========================================
+        # 🚀 新學期資料批次匯入區 (課表與教職員)
+        # ==========================================
+        st.markdown("---")
+        st.subheader("📁 新學期資料批次匯入 (Excel/CSV)")
+        st.info("💡 建議：新學期只需準備好符合格式的 CSV 或 Excel 檔案，一鍵上傳即可快速更新資料庫。")
+
+        # ------------------------------------------
+        # 產生範例 CSV 供管理者下載參考格式
+        # ------------------------------------------
+        with st.expander("📥 點此下載「匯入公版範例檔」"):
+            col_dl1, col_dl2 = st.columns(2)
+            
+            # 課表範例
+            sample_schedule = pd.DataFrame({
+                "班級": ["101", "101", "102"],
+                "星期": ["週一", "週一", "週二"],
+                "節次": ["第1節", "第2節", "第1節"],
+                "科目": ["國語", "數學", "英文"],
+                "教師": ["王小明", "王小明", "李大華"]
+            })
+            csv_schedule = sample_schedule.to_csv(index=False).encode('utf-8-sig') # utf-8-sig 讓 Excel 開啟不亂碼
+            col_dl1.download_button("下載【課表】範例 (CSV)", data=csv_schedule, file_name="sample_schedule.csv", mime="text/csv")
+            
+            # 教職員範例
+            sample_teacher = pd.DataFrame({
+                "帳號": ["t001", "t002"],
+                "姓名": ["王小明", "李大華"],
+                "密碼": ["Aa123456", "Bb123456"],
+                "信箱": ["t001@school.tc.edu.tw", "t002@school.tc.edu.tw"],
+                "任教班級": ["101", "102"]
+            })
+            csv_teacher = sample_teacher.to_csv(index=False).encode('utf-8-sig')
+            col_dl2.download_button("下載【教職員】範例 (CSV)", data=csv_teacher, file_name="sample_teacher.csv", mime="text/csv")
+
+        # ------------------------------------------
+        # 功能 A：匯入總日課表
+        # ------------------------------------------
+        st.markdown("#### 1. 批次更新班級課表")
+        schedule_file = st.file_uploader("請上傳新學期課表", type=["csv", "xlsx"], key="upload_schedule")
+        if schedule_file and st.button("🚀 確認匯入並覆寫課表", type="primary", use_container_width=True):
+            try:
+                with st.spinner("讀取並更新課表中，請稍候..."):
+                    # 判斷副檔名來讀取
+                    if schedule_file.name.endswith('.csv'):
+                        df_schedule = pd.read_csv(schedule_file)
+                    else:
+                        df_schedule = pd.read_excel(schedule_file)
+                    
+                    # 確保必要欄位存在
+                    required_cols = ["班級", "星期", "節次", "科目", "教師"]
+                    if not all(col in df_schedule.columns for col in required_cols):
+                        st.error(f"❌ 檔案格式錯誤！必須包含這五個欄位：{', '.join(required_cols)}")
+                    else:
+                        # 依據「班級」進行分組整理並寫入 Firebase
+                        batch_count = 0
+                        for class_name, group in df_schedule.groupby("班級"):
+                            class_data = {}
+                            for _, row in group.iterrows():
+                                wk = str(row["星期"]).strip()
+                                pr = str(row["節次"]).strip()
+                                if wk not in class_data:
+                                    class_data[wk] = {}
+                                class_data[wk][pr] = {
+                                    "subject": str(row["科目"]).strip(),
+                                    "teacher": str(row["教師"]).strip()
+                                }
+                            # 將該班級的整週課表寫入資料庫
+                            db.collection("schedules").document(str(class_name).strip()).set(class_data)
+                            batch_count += 1
+                            
+                        st.success(f"🎉 成功匯入並更新了 {batch_count} 個班級的課表！")
+                        time.sleep(2)
+                        st.rerun()
+            except Exception as e:
+                st.error(f"匯入失敗，請檢查檔案格式。錯誤訊息：{e}")
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # ------------------------------------------
+        # 功能 B：匯入教職員名單與基本資料
+        # ------------------------------------------
+        st.markdown("#### 2. 批次新增/更新教職員名單")
+        teacher_file = st.file_uploader("請上傳教職員名單", type=["csv", "xlsx"], key="upload_teacher")
+        if teacher_file and st.button("🚀 確認匯入教職員", type="primary", use_container_width=True):
+            try:
+                with st.spinner("讀取並更新教職員資料中，請稍候..."):
+                    if teacher_file.name.endswith('.csv'):
+                        df_teacher = pd.read_csv(teacher_file, dtype=str) # 強制視為字串避免帳號變成數字
+                    else:
+                        df_teacher = pd.read_excel(teacher_file, dtype=str)
+                        
+                    required_cols_t = ["帳號", "姓名", "密碼", "信箱"]
+                    if not all(col in df_teacher.columns for col in required_cols_t):
+                        st.error(f"❌ 檔案格式錯誤！必須包含欄位：{', '.join(required_cols_t)}")
+                    else:
+                        t_count = 0
+                        for _, row in df_teacher.iterrows():
+                            # 過濾掉空值
+                            if pd.isna(row["帳號"]) or not str(row["帳號"]).strip():
+                                continue
+                                
+                            username = str(row["帳號"]).strip()
+                            # 寫入 Teachers Collection
+                            db.collection("teachers").document(username).set({
+                                "username": username,
+                                "name": str(row["姓名"]).strip() if pd.notna(row["姓名"]) else "",
+                                "password": str(row["密碼"]).strip() if pd.notna(row["密碼"]) else "",
+                                "email": str(row["信箱"]).strip() if pd.notna(row["信箱"]) else "",
+                                "homeroom_class": str(row.get("任教班級", "")).strip() if "任教班級" in row and pd.notna(row["任教班級"]) else ""
+                            }, merge=True) # 使用 merge=True 避免覆蓋掉原有的其他隱藏設定
+                            t_count += 1
+                            
+                        st.success(f"🎉 成功處理了 {t_count} 筆教職員資料！")
+                        time.sleep(2)
+                        st.rerun()
+            except Exception as e:
+                st.error(f"匯入失敗，請檢查檔案格式。錯誤訊息：{e}")
